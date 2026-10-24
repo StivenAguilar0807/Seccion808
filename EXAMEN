@@ -1,0 +1,661 @@
+library(shiny)
+library(bslib)
+library(readxl)
+library(plotly)
+library(DT)
+library(dplyr)
+library(scales)
+library(ggplot2)
+
+# ==================================================
+# 1. TEMA Y DISEÑO
+# ==================================================
+
+tema <- bs_theme(
+  version = 5,
+  bootswatch = "flatly",
+  primary = "#2563EB",
+  base_font = font_google("Inter")
+)
+
+ui <- page_sidebar(
+  title = div(
+    span("BASS", style = "font-weight:800;color:#60A5FA;"),
+    span(" | Market Adoption", style = "font-weight:600;")
+  ),
+  theme = tema,
+  fillable = TRUE,
+  
+  sidebar = sidebar(
+    width = 320,
+    bg = "#111827",
+    fg = "#F9FAFB",
+    
+    h5("CONFIGURACIÓN", class = "fw-bold"),
+    p(
+      "Carga tus datos y ajusta los parámetros del modelo.",
+      style = "color:#9CA3AF;font-size:13px;"
+    ),
+    
+    fileInput(
+      "archivo",
+      "Subir archivo Excel",
+      accept = c(".xlsx", ".xls")
+    ),
+    
+    uiOutput("selector_hoja"),
+    uiOutput("selector_periodo"),
+    uiOutput("selector_ventas"),
+    
+    hr(),
+    
+    h6("PARÁMETROS DEL MODELO", class = "fw-bold"),
+    
+    sliderInput(
+      "p",
+      "p · Coeficiente de innovación",
+      min = 0.001,
+      max = 0.10,
+      value = 0.004918,
+      step = 0.001
+    ),
+    
+    sliderInput(
+      "q",
+      "q · Coeficiente de imitación",
+      min = 0.01,
+      max = 1.00,
+      value = 0.769195,
+      step = 0.01
+    ),
+    
+    numericInput(
+      "m",
+      "m · Mercado potencial",
+      value = 53423,
+      min = 1,
+      step = 1000
+    ),
+    
+    sliderInput(
+      "horizonte",
+      "Horizonte de proyección",
+      min = 5,
+      max = 30,
+      value = 15,
+      step = 1
+    ),
+    
+    actionButton(
+      "reiniciar",
+      "Restablecer parámetros",
+      class = "btn btn-outline-light w-100"
+    ),
+    
+    hr(),
+    
+    p(
+      "Modelo de difusión de Bass",
+      style = "font-size:12px;color:#9CA3AF;"
+    ),
+    p(
+      "Innovación + imitación",
+      style = "font-size:12px;color:#9CA3AF;"
+    )
+  ),
+  
+  # CSS
+  tags$head(
+    tags$style(HTML("
+      body {
+        background-color: #F3F6FB;
+      }
+
+      .card {
+        border: none;
+        border-radius: 15px;
+        box-shadow: 0 3px 14px rgba(15,23,42,.06);
+      }
+
+      .card-header {
+        background: white;
+        border-bottom: 1px solid #EEF2F7;
+        font-weight: 700;
+        padding: 16px 20px;
+      }
+
+      .kpi-label {
+        color: #64748B;
+        font-size: 13px;
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+
+      .kpi-value {
+        font-size: 27px;
+        font-weight: 800;
+        color: #0F172A;
+      }
+
+      .kpi-note {
+        font-size: 12px;
+        color: #64748B;
+        margin-top: 6px;
+      }
+
+      .section-title {
+        font-weight: 800;
+        color: #0F172A;
+      }
+    "))
+  ),
+  
+  h4("Panel de análisis de mercado", class = "section-title"),
+  p(
+    "Simulación del ciclo de vida y adopción del producto",
+    style = "color:#64748B;"
+  ),
+  
+  # INDICADORES
+  layout_columns(
+    col_widths = c(3, 3, 3, 3),
+    
+    card(
+      card_body(
+        div(class = "kpi-label", "MERCADO POTENCIAL"),
+        uiOutput("kpi_m"),
+        div(class = "kpi-note", "Parámetro m")
+      )
+    ),
+    
+    card(
+      card_body(
+        div(class = "kpi-label", "PICO DE ADOPCIÓN"),
+        uiOutput("kpi_pico"),
+        div(class = "kpi-note", "Periodo estimado")
+      )
+    ),
+    
+    card(
+      card_body(
+        div(class = "kpi-label", "ADOPCIÓN MÁXIMA"),
+        uiOutput("kpi_max"),
+        div(class = "kpi-note", "Nuevos adoptantes por periodo")
+      )
+    ),
+    
+    card(
+      card_body(
+        div(class = "kpi-label", "PENETRACIÓN FINAL"),
+        uiOutput("kpi_penetracion"),
+        div(class = "kpi-note", "Al final del horizonte")
+      )
+    )
+  ),
+  
+  # GRÁFICOS
+  layout_columns(
+    col_widths = c(7, 5),
+    
+    card(
+      card_header("Curva de adopción del producto"),
+      card_body(
+        plotlyOutput("grafico_adopcion", height = "340px")
+      )
+    ),
+    
+    card(
+      card_header("Adopción acumulada"),
+      card_body(
+        plotlyOutput("grafico_acumulado", height = "340px")
+      )
+    )
+  ),
+  
+  # TABLA EXCEL
+  card(
+    card_header("Vista previa de los datos del Excel"),
+    card_body(
+      DTOutput("tabla_excel")
+    )
+  ),
+  
+  # INTERPRETACIÓN
+  card(
+    card_header("Interpretación del modelo"),
+    card_body(
+      uiOutput("interpretacion")
+    )
+  )
+)
+
+# ==================================================
+# 2. SERVIDOR
+# ==================================================
+
+server <- function(input, output, session) {
+  
+  # Restablecer parámetros
+  observeEvent(input$reiniciar, {
+    updateSliderInput(session, "p", value = 0.004918)
+    updateSliderInput(session, "q", value = 0.769195)
+    updateNumericInput(session, "m", value = 53423)
+    updateSliderInput(session, "horizonte", value = 15)
+  })
+  
+  # Hojas disponibles
+  hojas <- reactive({
+    req(input$archivo)
+    excel_sheets(input$archivo$datapath)
+  })
+  
+  output$selector_hoja <- renderUI({
+    req(hojas())
+    
+    selectInput(
+      "hoja",
+      "Hoja del Excel",
+      choices = hojas(),
+      selected = hojas()[1]
+    )
+  })
+  
+  # Leer Excel
+  datos_originales <- reactive({
+    req(input$archivo, input$hoja)
+    
+    read_excel(
+      input$archivo$datapath,
+      sheet = input$hoja
+    ) |>
+      as.data.frame()
+  })
+  
+  # Selector de periodo
+  output$selector_periodo <- renderUI({
+    req(datos_originales())
+    
+    selectInput(
+      "col_periodo",
+      "Columna de periodo",
+      choices = c(
+        "Usar orden de filas" = "",
+        names(datos_originales())
+      ),
+      selected = ""
+    )
+  })
+  
+  # Selector de ventas numéricas
+  output$selector_ventas <- renderUI({
+    req(datos_originales())
+    
+    df <- datos_originales()
+    
+    numericas <- names(df)[
+      vapply(df, function(x) {
+        is.numeric(x)
+      }, logical(1))
+    ]
+    
+    selectInput(
+      "col_ventas",
+      "Columna de ventas/adopciones",
+      choices = numericas,
+      selected = if (length(numericas) > 0) {
+        numericas[1]
+      } else {
+        character(0)
+      }
+    )
+  })
+  
+  # Preparar datos observados
+  datos <- reactive({
+    req(datos_originales(), input$col_ventas)
+    
+    df <- datos_originales()
+    
+    ventas <- suppressWarnings(
+      as.numeric(df[[input$col_ventas]])
+    )
+    
+    if (
+      !is.null(input$col_periodo) &&
+      input$col_periodo != ""
+    ) {
+      periodo_original <- df[[input$col_periodo]]
+      
+      periodo_num <- suppressWarnings(
+        as.numeric(as.character(periodo_original))
+      )
+      
+      if (all(is.na(periodo_num))) {
+        periodo_num <- seq_len(nrow(df))
+        etiqueta <- as.character(periodo_original)
+      } else {
+        minimo <- min(periodo_num, na.rm = TRUE)
+        
+        periodo_num <- periodo_num - minimo + 1
+        etiqueta <- as.character(periodo_original)
+      }
+    } else {
+      periodo_num <- seq_len(nrow(df))
+      etiqueta <- as.character(periodo_num)
+    }
+    
+    tibble(
+      periodo = periodo_num,
+      etiqueta = etiqueta,
+      ventas = ventas
+    ) |>
+      filter(
+        is.finite(periodo),
+        is.finite(ventas)
+      )
+  })
+  
+  # --------------------------------------------------
+  # MODELO BASS
+  # --------------------------------------------------
+  
+  modelo <- reactive({
+    req(input$p, input$q, input$m, input$horizonte)
+    
+    p <- input$p
+    q <- input$q
+    m <- input$m
+    
+    validate(
+      need(p > 0, "El parámetro p debe ser mayor que cero."),
+      need(q >= 0, "El parámetro q no puede ser negativo."),
+      need(m > 0, "El mercado potencial debe ser positivo.")
+    )
+    
+    t_pico <- if (q > p) {
+      log(q / p) / (p + q)
+    } else {
+      0
+    }
+    
+    tiempo <- seq(
+      0,
+      input$horizonte,
+      length.out = max(301, input$horizonte * 30 + 1)
+    )
+    
+    nuevos <- m * (p + q)^2 / p *
+      exp(-(p + q) * tiempo) /
+      (1 + (q / p) * exp(-(p + q) * tiempo))^2
+    
+    acumulados <- m *
+      (1 - exp(-(p + q) * tiempo)) /
+      (1 + (q / p) * exp(-(p + q) * tiempo))
+    
+    curva <- tibble(
+      tiempo = tiempo,
+      nuevos = nuevos,
+      acumulados = acumulados
+    )
+    
+    list(
+      curva = curva,
+      t_pico = t_pico,
+      pico = max(nuevos),
+      adopcion_final = tail(acumulados, 1)
+    )
+  })
+  
+  # --------------------------------------------------
+  # INDICADORES
+  # --------------------------------------------------
+  
+  output$kpi_m <- renderUI({
+    div(
+      class = "kpi-value",
+      comma(input$m, accuracy = 1)
+    )
+  })
+  
+  output$kpi_pico <- renderUI({
+    div(
+      class = "kpi-value",
+      paste0(round(modelo()$t_pico, 2), " periodos")
+    )
+  })
+  
+  output$kpi_max <- renderUI({
+    div(
+      class = "kpi-value",
+      comma(modelo()$pico, accuracy = 1)
+    )
+  })
+  
+  output$kpi_penetracion <- renderUI({
+    porcentaje <- modelo()$adopcion_final / input$m
+    
+    div(
+      class = "kpi-value",
+      percent(porcentaje, accuracy = 0.1)
+    )
+  })
+  
+  # --------------------------------------------------
+  # GRÁFICO 1: NUEVOS ADOPTANTES
+  # --------------------------------------------------
+  
+  output$grafico_adopcion <- renderPlotly({
+    mod <- modelo()
+    curva <- mod$curva
+    
+    g <- plot_ly(
+      data = curva,
+      x = ~tiempo,
+      y = ~nuevos,
+      type = "scatter",
+      mode = "lines",
+      name = "Adopción estimada",
+      line = list(color = "#2563EB", width = 3),
+      fill = "tozeroy",
+      fillcolor = "rgba(37,99,235,0.10)",
+      hovertemplate = paste0(
+        "Periodo: %{x:.2f}",
+        "<br>Nuevos adoptantes: %{y:,.0f}",
+        "<extra></extra>"
+      )
+    )
+    
+    punto_pico <- approx(
+      curva$tiempo,
+      curva$nuevos,
+      xout = mod$t_pico
+    )$y
+    
+    g <- g |>
+      add_trace(
+        x = mod$t_pico,
+        y = punto_pico,
+        type = "scatter",
+        mode = "markers",
+        name = "Pico de adopción",
+        marker = list(color = "#F97316", size = 11),
+        hovertemplate = paste0(
+          "Pico: periodo %{x:.2f}",
+          "<br>Adoptantes: %{y:,.0f}",
+          "<extra></extra>"
+        )
+      )
+    
+    # Agregar ventas reales cuando se cargue Excel
+    if (
+      !is.null(input$archivo) &&
+      !is.null(input$col_ventas)
+    ) {
+      obs <- tryCatch(
+        datos(),
+        error = function(e) NULL
+      )
+      
+      if (!is.null(obs) && nrow(obs) > 0) {
+        g <- g |>
+          add_trace(
+            data = obs,
+            x = ~periodo,
+            y = ~ventas,
+            type = "scatter",
+            mode = "markers",
+            name = "Datos observados",
+            marker = list(color = "#059669", size = 7),
+            text = ~etiqueta,
+            hovertemplate = paste0(
+              "Periodo: %{text}",
+              "<br>Ventas observadas: %{y:,.0f}",
+              "<extra></extra>"
+            )
+          )
+      }
+    }
+    
+    g |>
+      layout(
+        xaxis = list(title = "Tiempo (periodos)"),
+        yaxis = list(title = "Nuevos adoptantes"),
+        legend = list(orientation = "h", y = -0.2),
+        margin = list(b = 70, l = 65, r = 20, t = 15),
+        hovermode = "x unified"
+      ) |>
+      config(
+        displayModeBar = TRUE,
+        displaylogo = FALSE
+      )
+  })
+  
+  # --------------------------------------------------
+  # GRÁFICO 2: ADOPCIÓN ACUMULADA
+  # --------------------------------------------------
+  
+  output$grafico_acumulado <- renderPlotly({
+    mod <- modelo()
+    curva <- mod$curva
+    
+    plot_ly(
+      data = curva,
+      x = ~tiempo,
+      y = ~acumulados,
+      type = "scatter",
+      mode = "lines",
+      name = "Adopción acumulada",
+      line = list(color = "#7C3AED", width = 3),
+      fill = "tozeroy",
+      fillcolor = "rgba(124,58,237,0.10)",
+      hovertemplate = paste0(
+        "Periodo: %{x:.2f}",
+        "<br>Acumulado: %{y:,.0f}",
+        "<extra></extra>"
+      )
+    ) |>
+      add_trace(
+        x = curva$tiempo,
+        y = rep(input$m, nrow(curva)),
+        type = "scatter",
+        mode = "lines",
+        name = "Mercado potencial",
+        line = list(color = "#94A3B8", dash = "dash")
+      ) |>
+      layout(
+        xaxis = list(title = "Tiempo (periodos)"),
+        yaxis = list(title = "Adopción acumulada"),
+        legend = list(orientation = "h", y = -0.2),
+        margin = list(b = 70, l = 65, r = 20, t = 15),
+        hovermode = "x unified"
+      ) |>
+      config(
+        displayModeBar = TRUE,
+        displaylogo = FALSE
+      )
+  })
+  
+  # --------------------------------------------------
+  # TABLA EXCEL
+  # --------------------------------------------------
+  
+  output$tabla_excel <- renderDT({
+    req(datos_originales())
+    
+    datatable(
+      head(datos_originales(), 10),
+      rownames = FALSE,
+      options = list(
+        pageLength = 5,
+        scrollX = TRUE,
+        dom = "tip"
+      )
+    )
+  })
+  
+  # --------------------------------------------------
+  # INTERPRETACIÓN AUTOMÁTICA
+  # --------------------------------------------------
+  
+  output$interpretacion <- renderUI({
+    mod <- modelo()
+    
+    p <- input$p
+    q <- input$q
+    m <- input$m
+    
+    penetracion <- mod$adopcion_final / m
+    
+    texto_pico <- if (q > p) {
+      paste0(
+        "La adopción alcanza su máximo aproximadamente ",
+        "en el periodo ",
+        round(mod$t_pico, 2),
+        "."
+      )
+    } else {
+      paste0(
+        "Como q es menor o igual que p, ",
+        "la adopción es máxima al inicio del horizonte ",
+        "(periodo 0)."
+      )
+    }
+    
+    tagList(
+      p(texto_pico),
+      
+      p(paste0(
+        "El parámetro p = ", round(p, 6),
+        " representa la innovación; q = ",
+        round(q, 6),
+        " representa la imitación; y m = ",
+        comma(m),
+        " es el mercado potencial."
+      )),
+      
+      p(paste0(
+        "Al final del horizonte de ",
+        input$horizonte,
+        " periodos, el modelo estima una adopción ",
+        "acumulada de ",
+        comma(mod$adopcion_final, accuracy = 1),
+        " unidades, equivalente al ",
+        percent(penetracion, accuracy = 0.1),
+        " del mercado potencial."
+      )),
+      
+      p(
+        paste0(
+          "El pico de nuevos adoptantes no equivale ",
+          "necesariamente a la madurez del mercado. ",
+          "La madurez se aproxima cuando la adopción ",
+          "acumulada se acerca a m y los nuevos adoptantes ",
+          "disminuyen."
+        ),
+        style = "color:#475569;"
+      )
+    )
+  })
+}
+
+shinyApp(ui = ui, server = server)
